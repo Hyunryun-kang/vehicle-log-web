@@ -318,30 +318,69 @@ function FinishScreen({ v, driver, purpose, start, row, go, err, setErr }) {
   const [saving, setSaving] = useState(false);
   const endRef = useRef(nowKST());
   useEffect(() => { (async () => { setLoadOdo(true); setLastOdo(await getLastOdometer(v)); setLoadOdo(false); })(); }, [v]);
+
   const distV = parseFloat(dist), odoV = parseFloat(odo);
-  const distOk = !isNaN(distV) && distV > 0, odoOk = !isNaN(odoV) && odoV > 0;
-  const canSave = distOk && odoOk && !saving;
+  const distOk = !isNaN(distV) && distV > 0;
+  const odoOk = !isNaN(odoV) && odoV > 0;
+  const isFirstTrip = !loadOdo && lastOdo === null;
+
+  // 첫 운행: 최종 주행거리만 있으면 저장 가능
+  // 이후 운행: 주행거리 + 최종 주행거리 둘 다 필요
+  const canSave = isFirstTrip
+    ? (odoOk && !saving)
+    : (distOk && odoOk && !saving);
+
   const save = async () => {
     setSaving(true); setErr(null); const end = endRef.current, purp = purpose || "미기재";
+    const finalDist = isFirstTrip ? (dist || "0") : dist;
     try { const sn = `차량_${v}`;
-      if (row > 0) { await sheetsUpdate(sn, row, [["C", end.time], ["E", dist], ["F", purp], ["G", odo], ["H", note || ""]]); }
-      else { await sheetsEnsureTab(v); await sheetsAppend(sn, [start?.date||end.date, start?.time||"", end.time, driver, dist, purp, odo, note||""]); }
+      if (row > 0) { await sheetsUpdate(sn, row, [["C", end.time], ["E", finalDist], ["F", purp], ["G", odo], ["H", note || ""]]); }
+      else { await sheetsEnsureTab(v); await sheetsAppend(sn, [start?.date||end.date, start?.time||"", end.time, driver, finalDist, purp, odo, note||""]); }
       go("select");
     } catch (e) { setErr(`저장 실패: ${e.message}`); } setSaving(false);
   };
+
   return (
     <div style={{ padding: 24 }}>
       <h2 style={{ fontSize: 18, fontWeight: 500, margin: "0 0 4px" }}>운행 기록 완료</h2>
       <p style={{ fontSize: 13, color: "#888", margin: "0 0 2px" }}>차량 {v} · {driver} · {purpose || "미기재"}</p>
       <p style={{ fontSize: 12, color: "#aaa", margin: "0 0 20px" }}>{start?.time?.slice(0, 5)} ~ {endRef.current.time.slice(0, 5)}</p>
-      <Box style={{ marginBottom: 16 }}><p style={{ fontSize: 12, color: "#888", margin: "0 0 4px" }}>직전 최종 주행거리 (시트 기준)</p><p style={{ fontSize: 20, fontWeight: 500, margin: 0 }}>{loadOdo ? "로딩 중..." : lastOdo !== null ? `${lastOdo.toLocaleString()} km` : "기록 없음 (첫 운행)"}</p></Box>
-      <Field label="주행거리 (km) — 계기판 보고 직접 입력" value={dist} onChange={e => setDist(e.target.value)} type="number" placeholder="예: 23.1" autoFocus />
-      <Field label="최종 주행거리 (km) — 계기판의 누적 값" value={odo} onChange={e => setOdo(e.target.value)} type="number" placeholder={lastOdo ? `직전: ${lastOdo.toLocaleString()}` : "계기판 값"} />
-      {lastOdo && !odo && <p style={{ fontSize: 11, color: "#aaa", margin: "-6px 0 10px 2px" }}>직전 {lastOdo.toLocaleString()} km 참고</p>}
+
+      {/* 직전 최종 주행거리 참고 카드 */}
+      <Box style={{ marginBottom: 16 }}>
+        <p style={{ fontSize: 12, color: "#888", margin: "0 0 4px" }}>직전 최종 주행거리 (시트 기준)</p>
+        <p style={{ fontSize: 20, fontWeight: 500, margin: 0 }}>
+          {loadOdo ? "로딩 중..." : lastOdo !== null ? `${lastOdo.toLocaleString()} km` : "기록 없음 (첫 운행)"}
+        </p>
+      </Box>
+
+      {/* 주행거리: 첫 운행이면 선택 입력, 이후는 필수 */}
+      {isFirstTrip ? (
+        <div style={{ marginBottom: 12 }}>
+          <Field label="주행거리 (km) — 선택 (첫 운행이라 생략 가능)" value={dist} onChange={e => setDist(e.target.value)} type="number" placeholder="모르면 비워두세요" />
+        </div>
+      ) : (
+        <div>
+          <Field label="주행거리 (km) — 계기판 보고 직접 입력" value={dist} onChange={e => setDist(e.target.value)} type="number" placeholder="예: 23.1" autoFocus />
+          {dist && !distOk && <p style={{ fontSize: 12, color: "#A32D2D", margin: "-8px 0 8px" }}>올바른 숫자를 입력하세요</p>}
+        </div>
+      )}
+
+      <Field label="최종 주행거리 (km) — 계기판의 누적 값" value={odo} onChange={e => setOdo(e.target.value)} type="number"
+        placeholder={lastOdo ? `직전: ${lastOdo.toLocaleString()}` : "계기판 값"} autoFocus={isFirstTrip} />
+      {lastOdo && !odo && <p style={{ fontSize: 11, color: "#aaa", margin: "-6px 0 10px 2px" }}>직전 {lastOdo.toLocaleString()} km 참고해서 입력하세요</p>}
+      {isFirstTrip && !odo && <p style={{ fontSize: 11, color: "#534AB7", margin: "-6px 0 10px 2px" }}>첫 운행입니다. 현재 계기판의 누적 km 를 입력해주세요</p>}
+
       <Field label="기타 (주유 필요, 엔진경고등 등)" value={note} onChange={e => setNote(e.target.value)} placeholder="없으면 비워두세요" />
+
       {err && <p style={{ color: "#A32D2D", fontSize: 13, margin: "8px 0" }}>{err}</p>}
       <Btn variant="primary" full onClick={save} disabled={!canSave} style={{ marginTop: 16 }}>{saving ? "저장 중..." : "저장"}</Btn>
-      {(dist && !distOk) && <p style={{ fontSize: 12, color: "#A32D2D", marginTop: 6 }}>올바른 숫자를 입력하세요</p>}
+
+      {!canSave && !saving && (
+        <p style={{ fontSize: 12, color: "#A32D2D", marginTop: 6, textAlign: "center" }}>
+          {!odoOk ? "최종 주행거리를 입력해주세요" : "주행거리를 입력해주세요"}
+        </p>
+      )}
     </div>
   );
 }
