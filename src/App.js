@@ -35,7 +35,6 @@ SDJqe0A4vroJiNRUX8j0Hp4+xA2U3BnVqN5OePOpNs1rpF153ap5DyRnc9UvMcnS
 // SA_EMAIL = service_account.json 의 "client_email" 값
 // SA_PRIVATE_KEY = service_account.json 의 "private_key" 값 (\\n 을 실제 줄바꿈으로)
 
-
 const VEHICLES = ["8971","3661","3622","7305","3531","3532","2135","2138"];
 const BASE = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}`;
 const STORAGE_USER = "vlw_user";
@@ -84,7 +83,8 @@ async function sheetsGet(range) {
 }
 async function sheetsAppend(sn, row) {
   const t = await getAccessToken();
-  const r = await fetch(`${BASE}/values/${encodeURIComponent(sn+"!A:H")}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+  const colEnd = row.length <= 3 ? "C" : "H";
+  const r = await fetch(`${BASE}/values/${encodeURIComponent(sn+"!A:"+colEnd)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     { method: "POST", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: [row] }) });
   if (!r.ok) throw new Error(`쓰기 실패 (${r.status})`);
   const d = await r.json(); const m = d.updates?.updatedRange?.match(/!A(\d+):/); return m ? parseInt(m[1]) : -1;
@@ -102,6 +102,34 @@ async function sheetsEnsureTab(v) {
     await fetch(`${BASE}/values/${encodeURIComponent(name+"!A1:H1")}?valueInputOption=RAW`, { method: "PUT", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: [["날짜","시작시각","종료시각","운행자","주행거리(km)","이용목적","최종주행거리(km)","기타"]] }) });
   } catch (e) { console.warn("탭:", e); }
 }
+async function ensureUsersTab() {
+  const t = await getAccessToken();
+  try {
+    const m = await fetch(`${BASE}?fields=sheets.properties.title`, { headers: { Authorization: `Bearer ${t}` } });
+    const d = await m.json();
+    if ((d.sheets||[]).map(s=>s.properties.title).includes("Users")) return;
+  } catch {}
+  try {
+    await fetch(`${BASE}:batchUpdate`, { method: "POST", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: "Users" } } }] }) });
+    await fetch(`${BASE}/values/${encodeURIComponent("Users!A1:C1")}?valueInputOption=RAW`, {
+      method: "PUT", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [["이름","휴대폰번호","등록일시"]] }) });
+  } catch (e) { console.warn("Users 탭:", e); }
+}
+
+async function registerUserToSheet(name, phone) {
+  try {
+    await ensureUsersTab();
+    // 중복 체크: 이름+번호 조합이 이미 있으면 skip
+    const rows = await sheetsGet("Users!A:B");
+    const exists = rows.slice(1).some(r => (r[0]||"") === name && (r[1]||"") === phone);
+    if (exists) return;
+    const now = nowKST();
+    await sheetsAppend("Users", [name, phone, `${now.date} ${now.time}`]);
+  } catch (e) { console.warn("사용자 시트 등록:", e); }
+}
+
 async function getLastOdometer(v) {
   try { const rows = await sheetsGet(`차량_${v}!G:G`); const vals = rows.slice(1).map(r=>parseFloat(r[0])).filter(v=>v>0); return vals.length>0?vals[vals.length-1]:null; } catch { return null; }
 }
@@ -136,6 +164,8 @@ export default function App() {
 
   const handleRegister = (name, phone) => {
     saveUser(name, phone); setUser({ name, phone }); go("select");
+    // 백그라운드로 시트에도 등록 (실패해도 앱 사용에 지장 없음)
+    registerUserToSheet(name, phone).catch(() => {});
   };
 
   // 자동 동기화
@@ -353,7 +383,10 @@ function SettingsScreen({ user, setUser, syncMin, setSyncMin, go }) {
   const [phone, setPhone] = useState(user?.phone || "");
   const [interval, setInterval_] = useState(String(syncMin || ""));
   const saveProfile = () => {
-    if (name.trim() && phone.trim()) { saveUser(name.trim(), phone.trim()); setUser({ name: name.trim(), phone: phone.trim() }); }
+    if (name.trim() && phone.trim()) {
+      saveUser(name.trim(), phone.trim()); setUser({ name: name.trim(), phone: phone.trim() });
+      registerUserToSheet(name.trim(), phone.trim()).catch(() => {});
+    }
   };
   const saveSync = () => {
     const v = parseInt(interval) || 0;
