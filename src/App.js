@@ -40,19 +40,21 @@ const BASE = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}`;
 const STORAGE_USER = "vlw_user";
 const STORAGE_SYNC = "vlw_sync_interval";
 
-// ── 로컬 저장소 (React state 기반, 세션 유지) ──────────────────────
-// React 아티팩트 환경에서는 localStorage 불가. 메모리 스토어로 대체.
-const memStore = {};
-function storageGet(key) { return memStore[key] || null; }
-function storageSet(key, val) { memStore[key] = val; }
+// ── 로컬 저장소 (localStorage) ──────────────────────────────────────
+// 브라우저를 닫아도 데이터 유지. 홈화면 바로가기에서도 동작.
 function getSavedUser() {
-  const raw = storageGet(STORAGE_USER);
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
+  try { const raw = localStorage.getItem(STORAGE_USER); return raw ? JSON.parse(raw) : null; }
+  catch { return null; }
 }
-function saveUser(name, phone) { storageSet(STORAGE_USER, JSON.stringify({ name, phone })); }
-function getSyncInterval() { return parseInt(storageGet(STORAGE_SYNC)) || 0; }
-function setSyncInterval(min) { storageSet(STORAGE_SYNC, String(min)); }
+function saveUser(name, phone) {
+  try { localStorage.setItem(STORAGE_USER, JSON.stringify({ name, phone })); } catch {}
+}
+function getSyncInterval() {
+  try { return parseInt(localStorage.getItem(STORAGE_SYNC)) || 0; } catch { return 0; }
+}
+function setSyncInterval(min) {
+  try { localStorage.setItem(STORAGE_SYNC, String(min)); } catch {}
+}
 
 // ── JWT + OAuth Token ───────────────────────────────────────────────
 let cachedToken = null, tokenExpiresAt = 0;
@@ -140,9 +142,20 @@ async function getRecentLogs(v, limit=30) {
 async function fetchVehicleStatuses() {
   const t = await getAccessToken(); const st = {}; let tabs = [];
   try { const m = await fetch(`${BASE}?fields=sheets.properties.title`, { headers: { Authorization: `Bearer ${t}` } }); const d = await m.json(); tabs = (d.sheets||[]).map(s=>s.properties.title); } catch { return st; }
+
+  // Users 탭에서 이름→전화번호 매핑
+  const phoneMap = {};
+  if (tabs.includes("Users")) {
+    try { const urows = await sheetsGet("Users!A:B"); urows.slice(1).forEach(r => { if(r[0]) phoneMap[r[0]] = r[1]||""; }); } catch {}
+  }
+
   for (const v of VEHICLES) { const name=`차량_${v}`; if(!tabs.includes(name))continue;
     try { const rows=await sheetsGet(`${name}!A:H`); if(rows.length<=1)continue; const last=rows[rows.length-1];
-      if((last[7]||"").includes("운행중")&&!(last[2]||"").trim()) st[v]={driver:last[3]||"",startTime:last[1]||"",purpose:last[5]||""}; } catch {} }
+      if((last[7]||"").includes("운행중")&&!(last[2]||"").trim()) {
+        const driverName = last[3]||"";
+        st[v]={driver:driverName,startTime:last[1]||"",purpose:last[5]||"",phone:phoneMap[driverName]||""};
+      }
+    } catch {} }
   return st;
 }
 function nowKST() { const d=new Date(),k=new Date(d.getTime()+9*3600000); return{date:k.toISOString().slice(0,10),time:k.toISOString().slice(11,19),ms:d.getTime()}; }
@@ -213,6 +226,8 @@ function RegisterScreen({ onRegister }) {
 function SelectScreen({ v, setV, go, statuses, setStatuses, user, syncMin }) {
   const [syncing, setSyncing] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [departWarn, setDepartWarn] = useState(null);
+  const [departWarned, setDepartWarned] = useState(false);
   const sync = async () => {
     setSyncing(true); setMsg(null);
     try { const st = await fetchVehicleStatuses(); setStatuses(st);
@@ -241,7 +256,7 @@ function SelectScreen({ v, setV, go, statuses, setStatuses, user, syncMin }) {
           let bg="transparent",border="0.5px solid #ddd",color="inherit";
           if(isSel){bg="#534AB7";border="none";color="#fff";}
           else if(active){bg="#EEEDFE";border="2px solid #534AB7";color="#3C3489";}
-          return (<button key={ve} onClick={()=>setV(ve)} style={{padding:"10px 6px",fontSize:14,fontWeight:isSel||active?500:400,borderRadius:12,border,background:bg,color,cursor:"pointer",textAlign:"center"}}>
+          return (<button key={ve} onClick={()=>{setV(ve);setDepartWarn(null);setDepartWarned(false);}} style={{padding:"10px 6px",fontSize:14,fontWeight:isSel||active?500:400,borderRadius:12,border,background:bg,color,cursor:"pointer",textAlign:"center"}}>
             <div>차량 {ve}</div>
             {active&&!isSel&&<div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:4,marginTop:4}}><span style={{width:6,height:6,background:"#534AB7",borderRadius:"50%",flexShrink:0}}/><span style={{fontSize:10,color:"#3C3489"}}>{active.driver} · {active.startTime?.slice(0,5)}~</span></div>}
             {!active&&!isSel&&<div style={{fontSize:10,color:"#aaa",marginTop:3}}>비어있음</div>}
@@ -250,7 +265,16 @@ function SelectScreen({ v, setV, go, statuses, setStatuses, user, syncMin }) {
           </button>);
         })}
       </div>
-      <Btn variant="primary" full onClick={()=>go("predepart")} style={{marginTop:16}}>출발</Btn>
+      <Btn variant="primary" full onClick={()=>{
+          const active = statuses[v];
+          if (active && !departWarned) {
+            setDepartWarn(`${active.driver} 이용중${active.phone ? " " + active.phone : ""}`);
+            setDepartWarned(true);
+            return;
+          }
+          setDepartWarn(null); setDepartWarned(false); go("predepart");
+        }} style={{marginTop:16}}>출발</Btn>
+        {departWarn && <p style={{fontSize:13,color:"#A32D2D",textAlign:"center",marginTop:8,background:"#FCEBEB",padding:"10px 12px",borderRadius:8}}>⚠️ {departWarn}<br/><span style={{fontSize:11,color:"#888"}}>한 번 더 누르면 출발합니다</span></p>}
       <Btn variant="outline" full onClick={()=>go("history")} style={{marginTop:8}}>운행 기록</Btn>
     </div>
   );
