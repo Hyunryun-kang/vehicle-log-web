@@ -36,6 +36,17 @@ SDJqe0A4vroJiNRUX8j0Hp4+xA2U3BnVqN5OePOpNs1rpF153ap5DyRnc9UvMcnS
 // SA_PRIVATE_KEY = service_account.json 의 "private_key" 값 (\\n 을 실제 줄바꿈으로)
 
 const VEHICLES = ["8971","3661","3622","7305","3531","3532","2135","2138"];
+
+// ── 시트 컬럼 스펙 (웹/앱 통일) ──────────────────────────────────────
+// Users: A=이름, B=번호, C=회원등록날짜, D=기타
+const USERS_HEADER = ["이름","번호","회원등록날짜","기타"];
+const USERS_COLS = "A:D";
+const PLATFORM_TAG = "웹";
+
+// 차량: A=차량번호(날짜), B=출발시간, C=종료시간, D=운전자,
+//       E=시작최종주행거리, F=종료최종주행거리, G=이동거리(자동계산), H=이용목적, I=기타
+const VEHICLE_HEADER = ["차량번호","출발시간","종료시간","운전자","시작최종주행거리","종료최종주행거리","이동거리(자동계산)","이용목적","기타"];
+const VEHICLE_COLS = "A:I";
 const BASE = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}`;
 const STORAGE_USER = "vlw_user";
 const STORAGE_SYNC = "vlw_sync_interval";
@@ -85,8 +96,8 @@ async function sheetsGet(range) {
 }
 async function sheetsAppend(sn, row) {
   const t = await getAccessToken();
-  const colEnd = row.length <= 3 ? "C" : "H";
-  const r = await fetch(`${BASE}/values/${encodeURIComponent(sn+"!A:"+colEnd)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+  const colEnd = row.length <= 4 ? USERS_COLS : VEHICLE_COLS;
+  const r = await fetch(`${BASE}/values/${encodeURIComponent(sn+"!"+colEnd)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     { method: "POST", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: [row] }) });
   if (!r.ok) throw new Error(`쓰기 실패 (${r.status})`);
   const d = await r.json(); const m = d.updates?.updatedRange?.match(/!A(\d+):/); return m ? parseInt(m[1]) : -1;
@@ -101,9 +112,47 @@ async function sheetsEnsureTab(v) {
   const t = await getAccessToken(); const name = `차량_${v}`;
   try { const m = await fetch(`${BASE}?fields=sheets.properties.title`, { headers: { Authorization: `Bearer ${t}` } }); const d = await m.json(); if ((d.sheets||[]).map(s=>s.properties.title).includes(name)) return; } catch {}
   try { await fetch(`${BASE}:batchUpdate`, { method: "POST", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify({ requests: [{ addSheet: { properties: { title: name } } }] }) });
-    await fetch(`${BASE}/values/${encodeURIComponent(name+"!A1:H1")}?valueInputOption=RAW`, { method: "PUT", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: [["날짜","시작시각","종료시각","운행자","주행거리(km)","이용목적","최종주행거리(km)","기타"]] }) });
+    await fetch(`${BASE}/values/${encodeURIComponent(name+"!A1:I1")}?valueInputOption=RAW`, { method: "PUT", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: [VEHICLE_HEADER] }) });
   } catch (e) { console.warn("탭:", e); }
 }
+/**
+ * 특정 차량의 "운행중" row 를 찾아서 강제종료 처리.
+ * 종료시각: 9999, 기타: 강제종료
+ * 24시간 지난 row 도 같이 처리 (자동만료).
+ */
+async function forceCloseActiveTrips(vehicle) {
+  try {
+    const sheetName = `차량_${vehicle}`;
+    const rows = await sheetsGet(`${sheetName}!A:H`);
+    if (rows.length <= 1) return;
+
+    const updates = [];
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const note = (row[8] || "").trim();
+      const endTime = (row[2] || "").trim();
+
+      if (note === "운행중" && !endTime) {
+        const rowIdx = i + 1; // 1-based
+        updates.push(
+          [`${sheetName}!C${rowIdx}`, "9999"],
+          [`${sheetName}!I${rowIdx}`, "강제종료"],
+        );
+      }
+    }
+
+    if (updates.length > 0) {
+      const t = await getAccessToken();
+      const data = updates.map(([range, val]) => ({ range, values: [[val]] }));
+      await fetch(`${BASE}/values:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
+      });
+    }
+  } catch (e) { console.warn("강제종료 처리:", e); }
+}
+
 async function ensureUsersTab() {
   const t = await getAccessToken();
   try {
@@ -114,9 +163,9 @@ async function ensureUsersTab() {
   try {
     await fetch(`${BASE}:batchUpdate`, { method: "POST", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
       body: JSON.stringify({ requests: [{ addSheet: { properties: { title: "Users" } } }] }) });
-    await fetch(`${BASE}/values/${encodeURIComponent("Users!A1:C1")}?valueInputOption=RAW`, {
+    await fetch(`${BASE}/values/${encodeURIComponent("Users!A1:D1")}?valueInputOption=RAW`, {
       method: "PUT", headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ values: [["이름","휴대폰번호","등록일시"]] }) });
+      body: JSON.stringify({ values: [USERS_HEADER] }) });
   } catch (e) { console.warn("Users 탭:", e); }
 }
 
@@ -125,19 +174,23 @@ async function registerUserToSheet(name, phone) {
     await ensureUsersTab();
     // 중복 체크: 이름+번호 조합이 이미 있으면 skip
     const rows = await sheetsGet("Users!A:B");
-    const exists = rows.slice(1).some(r => (r[0]||"") === name && (r[1]||"") === phone);
+    const exists = rows.slice(1).some(r => {
+      const n = (r[0]||"").trim();
+      const p = (r[1]||"").trim();
+      return n === name.trim() && p === phone.trim();
+    });
     if (exists) return;
     const now = nowKST();
-    await sheetsAppend("Users", [name, phone, `${now.date} ${now.time}`]);
+    await sheetsAppend("Users", [name, phone, `${now.date} ${now.time}`, PLATFORM_TAG]);
   } catch (e) { console.warn("사용자 시트 등록:", e); }
 }
 
 async function getLastOdometer(v) {
-  try { const rows = await sheetsGet(`차량_${v}!G:G`); const vals = rows.slice(1).map(r=>parseFloat(r[0])).filter(v=>v>0); return vals.length>0?vals[vals.length-1]:null; } catch { return null; }
+  try { const rows = await sheetsGet(`차량_${v}!F:F`); const vals = rows.slice(1).map(r=>parseFloat(r[0])).filter(v=>v>0); return vals.length>0?vals[vals.length-1]:null; } catch { return null; }
 }
 async function getRecentLogs(v, limit=30) {
-  try { const rows = await sheetsGet(`차량_${v}!A:H`); if(rows.length<=1)return[];
-    return rows.slice(1).reverse().slice(0,limit).map(r=>({ date:r[0]||"",start:r[1]||"",end:r[2]||"",driver:r[3]||"",dist:r[4]||"",purpose:r[5]||"",odometer:r[6]||"",note:r[7]||"" })); } catch { return []; }
+  try { const rows = await sheetsGet(`차량_${v}!A:I`); if(rows.length<=1)return[];
+    return rows.slice(1).reverse().slice(0,limit).map(r=>({ date:r[0]||"",start:r[1]||"",end:r[2]||"",driver:r[3]||"",startOdo:r[4]||"",endOdo:r[5]||"",dist:r[6]||"",purpose:r[7]||"",note:r[8]||"" })); } catch { return []; }
 }
 async function fetchVehicleStatuses() {
   const t = await getAccessToken(); const st = {}; let tabs = [];
@@ -150,10 +203,21 @@ async function fetchVehicleStatuses() {
   }
 
   for (const v of VEHICLES) { const name=`차량_${v}`; if(!tabs.includes(name))continue;
-    try { const rows=await sheetsGet(`${name}!A:H`); if(rows.length<=1)continue; const last=rows[rows.length-1];
-      if((last[7]||"").includes("운행중")&&!(last[2]||"").trim()) {
-        const driverName = last[3]||"";
-        st[v]={driver:driverName,startTime:last[1]||"",purpose:last[5]||"",phone:phoneMap[driverName]||""};
+    try { const rows=await sheetsGet(`${name}!A:I`); if(rows.length<=1)continue; const last=rows[rows.length-1];
+      if((last[8]||"").includes("운행중")&&!(last[2]||"").trim()) {
+        // 24시간 자동만료 체크
+        const startDate = last[0]||"";
+        const startTime = last[1]||"";
+        const startMs = new Date(`${startDate}T${startTime}+09:00`).getTime();
+        const hoursSince = (Date.now() - startMs) / 3600000;
+
+        if (hoursSince > 24) {
+          // 자동만료 처리
+          forceCloseActiveTrips(v).catch(()=>{});
+        } else {
+          const driverName = last[3]||"";
+          st[v]={driver:driverName,startTime:last[1]||"",purpose:last[5]||"",phone:phoneMap[driverName]||""};
+        }
       }
     } catch {} }
   return st;
@@ -168,6 +232,7 @@ export default function App() {
   const [purpose, setPurpose] = useState("");
   const [startInfo, setStartInfo] = useState(null);
   const [sheetRow, setSheetRow] = useState(-1);
+  const [startOdo, setStartOdo] = useState(0);
   const [error, setError] = useState(null);
   const [statuses, setStatuses] = useState({});
   const [syncIntervalMin, setSyncIntervalMin] = useState(() => getSyncInterval());
@@ -196,9 +261,9 @@ export default function App() {
     <div style={{ maxWidth: 440, margin: "0 auto", fontFamily: "'Pretendard',system-ui,-apple-system,sans-serif", color: "#1a1a1a", minHeight: "100dvh", paddingBottom: 20 }}>
       {screen === "register" && <RegisterScreen onRegister={handleRegister} />}
       {screen === "select" && <SelectScreen v={vehicle} setV={setVehicle} go={go} statuses={statuses} setStatuses={setStatuses} user={user} syncMin={syncIntervalMin} />}
-      {screen === "predepart" && <PreDepartScreen v={vehicle} user={user} purpose={purpose} setPurpose={setPurpose} setStartInfo={setStartInfo} setSheetRow={setSheetRow} go={go} err={error} setErr={setError} />}
+      {screen === "predepart" && <PreDepartScreen v={vehicle} user={user} purpose={purpose} setPurpose={setPurpose} setStartInfo={setStartInfo} setSheetRow={setSheetRow} go={go} err={error} setErr={setError} setStartOdo={setStartOdo} />}
       {screen === "active" && <ActiveScreen v={vehicle} driver={user?.name||""} purpose={purpose} start={startInfo} go={go} />}
-      {screen === "finish" && <FinishScreen v={vehicle} driver={user?.name||""} purpose={purpose} start={startInfo} row={sheetRow} go={go} err={error} setErr={setError} />}
+      {screen === "finish" && <FinishScreen v={vehicle} driver={user?.name||""} purpose={purpose} start={startInfo} row={sheetRow} go={go} err={error} setErr={setError} startOdo={startOdo} />}
       {screen === "history" && <HistoryScreen v={vehicle} go={go} />}
       {screen === "settings" && <SettingsScreen user={user} setUser={setUser} syncMin={syncIntervalMin} setSyncMin={(m) => { setSyncIntervalMin(m); setSyncInterval(m); }} go={go} />}
     </div>
@@ -281,27 +346,52 @@ function SelectScreen({ v, setV, go, statuses, setStatuses, user, syncMin }) {
 }
 
 // ── 2. 출발 전 입력 (이름 자동 채움) ────────────────────────────────
-function PreDepartScreen({ v, user, purpose, setPurpose, setStartInfo, setSheetRow, go, err, setErr }) {
+function PreDepartScreen({ v, user, purpose, setPurpose, setStartInfo, setSheetRow, go, err, setErr, setStartOdo }) {
   const [busy, setBusy] = useState(false);
+  const [lastOdo, setLastOdo] = useState(null);
+  const [loadOdo, setLoadOdo] = useState(true);
+  const [odo, setOdo] = useState("");
   const driverName = user?.name || "";
+
+  useEffect(() => { (async () => { setLoadOdo(true); const o = await getLastOdometer(v); setLastOdo(o); if (o !== null) setOdo(String(o)); setLoadOdo(false); })(); }, [v]);
+
+  const odoV = parseFloat(odo);
+  const odoOk = !isNaN(odoV) && odoV > 0;
+  const canGo = odoOk && !busy;
+
   const depart = async () => {
-    setBusy(true); setErr(null); const info = nowKST(); setStartInfo(info);
-    try { await sheetsEnsureTab(v); const idx = await sheetsAppend(`차량_${v}`, [info.date, info.time, "", driverName, "", purpose.trim()||"미기재", "", "운행중"]); setSheetRow(idx); }
+    setBusy(true); setErr(null); const info = nowKST(); setStartInfo(info); setStartOdo(odoV);
+    try {
+      await sheetsEnsureTab(v);
+      // 이전 "운행중" row 가 있으면 강제종료 처리
+      await forceCloseActiveTrips(v);
+      const idx = await sheetsAppend(`차량_${v}`, [info.date, info.time, "", driverName, String(odoV), "", "", purpose.trim()||"미기재", "운행중"]); setSheetRow(idx);
+    }
     catch(e){console.warn("출발 기록:",e);setSheetRow(-1);} setBusy(false); go("active");
   };
+
   return (
     <div style={{ padding: 24 }}>
-      <Box style={{ textAlign: "center", marginBottom: 24 }}>
+      <Box style={{ textAlign: "center", marginBottom: 20 }}>
         <p style={{ fontSize: 24, fontWeight: 500, margin: "0 0 4px" }}>차량 {v}</p>
-        <p style={{ fontSize: 13, color: "#888", margin: 0 }}>출발 전 정보를 확인해주세요</p>
+        <p style={{ fontSize: 13, color: "#888", margin: 0 }}>출발 전 정보를 입력해주세요</p>
       </Box>
       <Box style={{ marginBottom: 12 }}>
         <p style={{ fontSize: 12, color: "#888", margin: "0 0 2px" }}>운행자</p>
         <p style={{ fontSize: 18, fontWeight: 500, margin: 0 }}>{driverName}</p>
       </Box>
-      <Field label="이용 목적" value={purpose} onChange={e => setPurpose(e.target.value)} autoFocus />
+      <Field label="이용 목적" value={purpose} onChange={e => setPurpose(e.target.value)} />
+
+      <Box style={{ marginBottom: 8 }}>
+        <p style={{ fontSize: 12, color: "#888", margin: "0 0 4px" }}>직전 최종 주행거리 (시트 기준)</p>
+        <p style={{ fontSize: 18, fontWeight: 500, margin: 0 }}>{loadOdo ? "로딩 중..." : lastOdo !== null ? `${lastOdo.toLocaleString()} km` : "기록 없음 (첫 운행)"}</p>
+      </Box>
+      <Field label="출발 시 최종 주행거리 (km) — 계기판 확인" value={odo} onChange={e => setOdo(e.target.value)} type="number" placeholder={lastOdo ? `직전: ${lastOdo.toLocaleString()}` : "계기판 값"} autoFocus={!loadOdo} />
+      {lastOdo !== null && !odo && <p style={{ fontSize: 11, color: "#aaa", margin: "-6px 0 8px 2px" }}>직전 {lastOdo.toLocaleString()} km 에서 변동 없으면 그대로 두세요</p>}
+      {lastOdo === null && <p style={{ fontSize: 11, color: "#534AB7", margin: "-6px 0 8px 2px" }}>첫 운행입니다. 계기판의 현재 누적 km 를 입력해주세요</p>}
+
       {err && <p style={{ color: "#A32D2D", fontSize: 13 }}>{err}</p>}
-      <Btn variant="primary" full onClick={depart} disabled={busy} style={{ marginTop: 16 }}>
+      <Btn variant="primary" full onClick={depart} disabled={!canGo} style={{ marginTop: 12 }}>
         {busy ? "시트 기록 중..." : "출발 (운행 시작)"}
       </Btn>
       <Btn variant="text" onClick={() => go("select")} style={{ marginTop: 8 }}>← 차량 선택으로</Btn>
@@ -333,33 +423,24 @@ function ActiveScreen({ v, driver, purpose, start, go }) {
 }
 
 // ── 4. 운행 완료 ────────────────────────────────────────────────────
-function FinishScreen({ v, driver, purpose, start, row, go, err, setErr }) {
-  const [lastOdo, setLastOdo] = useState(null);
-  const [loadOdo, setLoadOdo] = useState(true);
-  const [dist, setDist] = useState("");
+function FinishScreen({ v, driver, purpose, start, row, go, err, setErr, startOdo }) {
   const [odo, setOdo] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
   const endRef = useRef(nowKST());
-  useEffect(() => { (async () => { setLoadOdo(true); setLastOdo(await getLastOdometer(v)); setLoadOdo(false); })(); }, [v]);
 
-  const distV = parseFloat(dist), odoV = parseFloat(odo);
-  const distOk = !isNaN(distV) && distV > 0;
+  const odoV = parseFloat(odo);
   const odoOk = !isNaN(odoV) && odoV > 0;
-  const isFirstTrip = !loadOdo && lastOdo === null;
-
-  // 첫 운행: 최종 주행거리만 있으면 저장 가능
-  // 이후 운행: 주행거리 + 최종 주행거리 둘 다 필요
-  const canSave = isFirstTrip
-    ? (odoOk && !saving)
-    : (distOk && odoOk && !saving);
+  // 주행거리 = 도착 최종주행거리 - 출발 최종주행거리
+  const calcDist = (odoOk && startOdo > 0) ? Math.max(0, odoV - startOdo) : 0;
+  const canSave = odoOk && !saving;
 
   const save = async () => {
     setSaving(true); setErr(null); const end = endRef.current, purp = purpose || "미기재";
-    const finalDist = isFirstTrip ? (dist || "0") : dist;
+    const distStr = calcDist > 0 ? calcDist.toFixed(1) : "0";
     try { const sn = `차량_${v}`;
-      if (row > 0) { await sheetsUpdate(sn, row, [["C", end.time], ["E", finalDist], ["F", purp], ["G", odo], ["H", note || ""]]); }
-      else { await sheetsEnsureTab(v); await sheetsAppend(sn, [start?.date||end.date, start?.time||"", end.time, driver, finalDist, purp, odo, note||""]); }
+      if (row > 0) { await sheetsUpdate(sn, row, [["C", end.time], ["F", String(odoV)], ["G", distStr], ["H", purp], ["I", note || ""]]); }
+      else { await sheetsEnsureTab(v); await sheetsAppend(sn, [start?.date||end.date, start?.time||"", end.time, driver, String(startOdo), String(odoV), distStr, purp, note||""]); }
       go("select");
     } catch (e) { setErr(`저장 실패: ${e.message}`); } setSaving(false);
   };
@@ -370,41 +451,27 @@ function FinishScreen({ v, driver, purpose, start, row, go, err, setErr }) {
       <p style={{ fontSize: 13, color: "#888", margin: "0 0 2px" }}>차량 {v} · {driver} · {purpose || "미기재"}</p>
       <p style={{ fontSize: 12, color: "#aaa", margin: "0 0 20px" }}>{start?.time?.slice(0, 5)} ~ {endRef.current.time.slice(0, 5)}</p>
 
-      {/* 직전 최종 주행거리 참고 카드 */}
-      <Box style={{ marginBottom: 16 }}>
-        <p style={{ fontSize: 12, color: "#888", margin: "0 0 4px" }}>직전 최종 주행거리 (시트 기준)</p>
-        <p style={{ fontSize: 20, fontWeight: 500, margin: 0 }}>
-          {loadOdo ? "로딩 중..." : lastOdo !== null ? `${lastOdo.toLocaleString()} km` : "기록 없음 (첫 운행)"}
-        </p>
+      <Box style={{ marginBottom: 12 }}>
+        <p style={{ fontSize: 12, color: "#888", margin: "0 0 4px" }}>출발 시 최종 주행거리</p>
+        <p style={{ fontSize: 18, fontWeight: 500, margin: 0 }}>{startOdo > 0 ? `${startOdo.toLocaleString()} km` : "미입력"}</p>
       </Box>
 
-      {/* 주행거리: 첫 운행이면 선택 입력, 이후는 필수 */}
-      {isFirstTrip ? (
-        <div style={{ marginBottom: 12 }}>
-          <Field label="주행거리 (km) — 선택 (첫 운행이라 생략 가능)" value={dist} onChange={e => setDist(e.target.value)} type="number" placeholder="모르면 비워두세요" />
-        </div>
-      ) : (
-        <div>
-          <Field label="주행거리 (km) — 계기판 보고 직접 입력" value={dist} onChange={e => setDist(e.target.value)} type="number" placeholder="예: 23.1" autoFocus />
-          {dist && !distOk && <p style={{ fontSize: 12, color: "#A32D2D", margin: "-8px 0 8px" }}>올바른 숫자를 입력하세요</p>}
-        </div>
-      )}
+      <Field label="도착 시 최종 주행거리 (km) — 계기판 확인" value={odo} onChange={e => setOdo(e.target.value)} type="number" placeholder="계기판 값" autoFocus />
 
-      <Field label="최종 주행거리 (km) — 계기판의 누적 값" value={odo} onChange={e => setOdo(e.target.value)} type="number"
-        placeholder={lastOdo ? `직전: ${lastOdo.toLocaleString()}` : "계기판 값"} autoFocus={isFirstTrip} />
-      {lastOdo && !odo && <p style={{ fontSize: 11, color: "#aaa", margin: "-6px 0 10px 2px" }}>직전 {lastOdo.toLocaleString()} km 참고해서 입력하세요</p>}
-      {isFirstTrip && !odo && <p style={{ fontSize: 11, color: "#534AB7", margin: "-6px 0 10px 2px" }}>첫 운행입니다. 현재 계기판의 누적 km 를 입력해주세요</p>}
+      {odoOk && startOdo > 0 && (
+        <Box style={{ marginBottom: 12, background: "#EEEDFE" }}>
+          <p style={{ fontSize: 12, color: "#534AB7", margin: "0 0 2px" }}>주행거리 (자동 계산)</p>
+          <p style={{ fontSize: 20, fontWeight: 500, margin: 0, color: "#3C3489" }}>{calcDist.toFixed(1)} km</p>
+          <p style={{ fontSize: 11, color: "#888", margin: "2px 0 0" }}>{odoV.toLocaleString()} - {startOdo.toLocaleString()} = {calcDist.toFixed(1)}</p>
+        </Box>
+      )}
 
       <Field label="기타 (주유 필요, 엔진경고등 등)" value={note} onChange={e => setNote(e.target.value)} placeholder="없으면 비워두세요" />
 
       {err && <p style={{ color: "#A32D2D", fontSize: 13, margin: "8px 0" }}>{err}</p>}
       <Btn variant="primary" full onClick={save} disabled={!canSave} style={{ marginTop: 16 }}>{saving ? "저장 중..." : "저장"}</Btn>
-
-      {!canSave && !saving && (
-        <p style={{ fontSize: 12, color: "#A32D2D", marginTop: 6, textAlign: "center" }}>
-          {!odoOk ? "최종 주행거리를 입력해주세요" : "주행거리를 입력해주세요"}
-        </p>
-      )}
+      {!odoOk && odo && <p style={{ fontSize: 12, color: "#A32D2D", marginTop: 6, textAlign: "center" }}>올바른 숫자를 입력하세요</p>}
+      {!odoOk && !odo && <p style={{ fontSize: 12, color: "#888", marginTop: 6, textAlign: "center" }}>최종 주행거리를 입력해주세요</p>}
     </div>
   );
 }
@@ -430,7 +497,7 @@ function HistoryScreen({ v, go }) {
           </div>
           <p style={{ fontSize: 12, color: "#888", margin: "3px 0" }}>{l.date} {l.start}{l.end ? ` ~ ${l.end}` : ""}</p>
           {l.purpose && l.note !== "운행중" && <p style={{ fontSize: 13, margin: "2px 0" }}>{l.purpose}</p>}
-          {l.dist && <p style={{ fontSize: 13, margin: "2px 0" }}>주행 {l.dist} km{l.odometer ? ` · 최종 ${l.odometer} km` : ""}</p>}
+          {(l.dist || l.endOdo) && <p style={{ fontSize: 13, margin: "2px 0" }}>{l.dist ? `주행 ${l.dist} km · ` : ""}최종 {l.endOdo || l.startOdo || "?"} km</p>}
           {l.note && l.note !== "운행중" && <p style={{ fontSize: 12, color: "#888", margin: "2px 0" }}>기타: {l.note}</p>}
           {l.end && l.note !== "운행중" && <p style={{ fontSize: 11, color: "#3B6D11", marginTop: 3 }}>✓ 완료</p>}
           {!l.end && l.note === "운행중" && <p style={{ fontSize: 11, color: "#534AB7", marginTop: 3 }}>종료 대기 중</p>}
